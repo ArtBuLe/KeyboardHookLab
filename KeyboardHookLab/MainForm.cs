@@ -1,16 +1,20 @@
 ﻿using System.ComponentModel;
 using System.Diagnostics;
+using System.Threading;
 using System.Windows.Forms;
 using KeyboardHookLab.Interop;
 
 namespace KeyboardHookLab;
-// Теперь добавим журнал с временем, кнопку очистки и управление hook.
+
 public sealed class MainForm : Form
 {
     private readonly TextBox _logTextBox;
     private readonly CheckBox _hookCheckBox;
     private readonly Label _statusLabel;
+    private readonly Label _counterLabel;
     private readonly KeyboardHook _keyboardHook;
+
+    private int _eventCounter = 0;
 
     public MainForm()
     {
@@ -52,6 +56,13 @@ public sealed class MainForm : Form
             Margin = new Padding(8)
         };
 
+        _counterLabel = new Label
+        {
+            Text = "Событий: 0",
+            AutoSize = true,
+            Margin = new Padding(8),
+        };
+
         var toolbar = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
@@ -62,6 +73,7 @@ public sealed class MainForm : Form
         toolbar.Controls.Add(_hookCheckBox);
         toolbar.Controls.Add(clearButton);
         toolbar.Controls.Add(_statusLabel);
+        toolbar.Controls.Add(_counterLabel);
 
         Controls.Add(_logTextBox);
         Controls.Add(toolbar);
@@ -71,10 +83,13 @@ public sealed class MainForm : Form
         clearButton.Click += (_, _) =>
         {
             _logTextBox.Clear();
+            _eventCounter = 0;
+            _counterLabel.Text = "Событий: 0";
         };
 
         _hookCheckBox.CheckedChanged += OnHookCheckedChanged;
 
+        // Управление жизненным циклом hook в зависимости от активности окна
         Activated += OnFormActivated;
         Deactivate += OnFormDeactivated;
         FormClosing += OnFormClosing;
@@ -82,9 +97,7 @@ public sealed class MainForm : Form
 
     private void OnLocalKeyDown(object? sender, KeyEventArgs e)
     {
-        AppendLog(
-            "WinForms",
-            e.KeyCode.ToString());
+        AppendLog("WinForms", e.KeyCode.ToString());
     }
 
     private void OnHookKeyPressed(Keys key)
@@ -92,39 +105,36 @@ public sealed class MainForm : Form
         if (IsDisposed || !IsHandleCreated)
             return;
 
-        try
+        // Обновляем интерфейс через очередь сообщений формы, чтобы избежать кросс-поточных исключений
+        BeginInvoke(new Action(() =>
         {
-            // Обновляем интерфейс через очередь сообщений формы.
-            BeginInvoke(new Action(() =>
+            if (!IsDisposed)
             {
-                if (!IsDisposed)
-                {
-                    AppendLog(
-                        "Low-level hook",
-                        key.ToString());
-                }
-            }));
-        }
-        catch (InvalidOperationException ex)
-        {
-            Debug.WriteLine(
-                $"Не удалось обновить журнал: {ex}");
-        }
+                AppendLog("Low-level hook", key.ToString());
+            }
+        }));
     }
 
     private void AppendLog(string source, string key)
     {
-        string timestamp =
-            DateTimeOffset.Now.ToString("HH:mm:ss.fff");
+        // Безопасное инкрементирование счётчика
+        int currentCount = Interlocked.Increment(ref _eventCounter);
+        string timestamp = DateTimeOffset.Now.ToString("HH:mm:ss.fff");
+        string logEntry = $"[{timestamp}] [{source}] {key}{Environment.NewLine}";
 
-        _logTextBox.AppendText(
-            $"[{timestamp}] [{source}] {key}" +
-            Environment.NewLine);
+        if (IsDisposed || !IsHandleCreated) return;
+
+        BeginInvoke(new Action(() =>
+        {
+            if (!IsDisposed)
+            {
+                _logTextBox.AppendText(logEntry);
+                _counterLabel.Text = $"Событий: {currentCount}";
+            }
+        }));
     }
 
-    private void OnHookCheckedChanged(
-        object? sender,
-        EventArgs e)
+    private void OnHookCheckedChanged(object? sender, EventArgs e)
     {
         if (_hookCheckBox.Checked)
         {
@@ -137,17 +147,13 @@ public sealed class MainForm : Form
         }
     }
 
-    private void OnFormActivated(
-        object? sender,
-        EventArgs e)
+    private void OnFormActivated(object? sender, EventArgs e)
     {
         if (_hookCheckBox.Checked)
             StartHook();
     }
 
-    private void OnFormDeactivated(
-        object? sender,
-        EventArgs e)
+    private void OnFormDeactivated(object? sender, EventArgs e)
     {
         StopHook();
     }
@@ -160,21 +166,14 @@ public sealed class MainForm : Form
         try
         {
             _keyboardHook.Start();
-
             _statusLabel.Text = "Hook установлен";
             AppendLog("System", "Hook установлен");
         }
         catch (Win32Exception ex)
         {
             _statusLabel.Text = "Ошибка установки hook";
-
-            AppendLog(
-                "Error",
-                ex.Message);
-
-            // Сбрасываем переключатель, чтобы UI отражал
-            // фактическое состояние hook.
-            _hookCheckBox.Checked = false;
+            AppendLog("Error", ex.Message);
+            _hookCheckBox.Checked = false; // Синхронизируем UI с реальным состоянием
         }
     }
 
@@ -186,24 +185,21 @@ public sealed class MainForm : Form
         try
         {
             _keyboardHook.Stop();
-
             _statusLabel.Text = "Hook не установлен";
             AppendLog("System", "Hook снят");
         }
         catch (Win32Exception ex)
         {
             _statusLabel.Text = "Ошибка снятия hook";
-
-            AppendLog(
-                "Error",
-                ex.Message);
+            AppendLog("Error", ex.Message);
         }
     }
 
-    private void OnFormClosing(
-        object? sender,
-        FormClosingEventArgs e)
+    private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
+        // Задание 4: Делаем кнопку недоступной во время закрытия формы
+        _hookCheckBox.Enabled = false;
+
         StopHook();
 
         try
@@ -212,8 +208,7 @@ public sealed class MainForm : Form
         }
         catch (Win32Exception ex)
         {
-            Debug.WriteLine(
-                $"Ошибка освобождения hook: {ex}");
+            Debug.WriteLine($"Ошибка освобождения hook: {ex}");
         }
     }
 }

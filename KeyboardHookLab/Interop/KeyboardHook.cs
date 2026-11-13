@@ -4,35 +4,22 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace KeyboardHookLab.Interop;
-// Это класс-обёртка над Windows API. Он отвечает за установку hook, получение уведомлений и освобождение дескриптора.
+
 public sealed class KeyboardHook : IDisposable
 {
-    // Тип hook
-    // Число `13` - идентификатор низкоуровневого клавиатурного hook в Windows API.
     private const int WH_KEYBOARD_LL = 13;
-
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_SYSKEYDOWN = 0x0104;
 
-    // Windows вызывает этот метод при поступлении подходящего клавиатурного события.
-    private delegate IntPtr LowLevelKeyboardProc(
-        int nCode, // код обработки hook
-        IntPtr wParam, // тип сообщения, например `WM_KEYDOWN`
-        IntPtr lParam); // указатель на структуру с информацией о клавише
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
-
-    // Windows получает адрес callback. 
-    // Если делегат не удерживать ссылкой в управляемом коде, 
-    // сборщик мусора может его освободить, 
-    // пока нативная сторона ещё рассчитывает на него.
+    // Делегат хранится в поле, чтобы GC не уничтожил его, пока он нужен нативному коду
     private readonly LowLevelKeyboardProc _callback;
-
     private IntPtr _hookHandle = IntPtr.Zero;
 
     public event Action<Keys>? KeyPressed;
 
-    public bool IsInstalled =>
-        _hookHandle != IntPtr.Zero;
+    public bool IsInstalled => _hookHandle != IntPtr.Zero;
 
     public KeyboardHook()
     {
@@ -42,96 +29,64 @@ public sealed class KeyboardHook : IDisposable
     public void Start()
     {
         if (IsInstalled)
-            return;
+            return; // Защита от повторной установки (Задание 5)
 
-        _hookHandle = SetWindowsHookEx(
-            WH_KEYBOARD_LL,
-            _callback,
-            IntPtr.Zero,
-            0);
+        _hookHandle = SetWindowsHookEx(WH_KEYBOARD_LL, _callback, IntPtr.Zero, 0);
 
         if (_hookHandle == IntPtr.Zero)
         {
             int errorCode = Marshal.GetLastWin32Error();
-
-            throw new Win32Exception(
-                errorCode,
-                "Не удалось установить клавиатурный hook.");
+            throw new Win32Exception(errorCode, "Не удалось установить клавиатурный hook.");
         }
     }
 
     public void Stop()
     {
         if (!IsInstalled)
-            return;
+            return; // Защита от повторного снятия (Задание 6)
 
         bool success = UnhookWindowsHookEx(_hookHandle);
 
         if (!success)
         {
             int errorCode = Marshal.GetLastWin32Error();
-
-            throw new Win32Exception(
-                errorCode,
-                "Не удалось снять клавиатурный hook.");
+            throw new Win32Exception(errorCode, "Не удалось снять клавиатурный hook.");
         }
 
         _hookHandle = IntPtr.Zero;
     }
 
-    private IntPtr HookCallback(
-        int nCode,
-        IntPtr wParam,
-        IntPtr lParam)
+    private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 &&
-            (wParam == (IntPtr)WM_KEYDOWN ||
-             wParam == (IntPtr)WM_SYSKEYDOWN))
+        // Проверяем код и тип сообщения (включая системные клавиши, например, Alt)
+        if (nCode >= 0 && (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN))
         {
             try
             {
-
-                // Структура события
-                // `lParam` содержит указатель на нативную структуру. 
-                // `Marshal.PtrToStructure` преобразует её в управляемую структуру C#.
-                // Поле `vkCode` содержит виртуальный код клавиши.
-                var keyboardInfo =
-                    Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
-
+                var keyboardInfo = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
                 IntPtr foregroundWindow = GetForegroundWindow();
 
                 if (foregroundWindow != IntPtr.Zero)
                 {
-                    GetWindowThreadProcessId(
-                        foregroundWindow,
-                        out uint processId);
+                    GetWindowThreadProcessId(foregroundWindow, out uint processId);
 
-                    // Обрабатываем только события нашего процесса.
-                    // Hook низкого уровня может получать события, относящиеся к разным приложениям.
-                    // Поэтому мы проверяем PID активного окна и обрабатываем только события собственного процесса.
+                    // Обрабатываем события только нашего процесса
                     if (processId == (uint)Environment.ProcessId)
                     {
                         Keys key = (Keys)keyboardInfo.vkCode;
-
                         KeyPressed?.Invoke(key);
                     }
                 }
             }
             catch (Exception ex)
             {
-                // Исключение не должно выйти через границу
-                // управляемого и неуправляемого callback.
-                Debug.WriteLine(
-                    $"Ошибка callback клавиатуры: {ex}");
+                // Исключение не должно выходить за границы callback
+                Debug.WriteLine($"Ошибка callback клавиатуры: {ex}");
             }
         }
 
-        // Не блокируем событие: передаём его дальше.
-        return CallNextHookEx(
-            _hookHandle,
-            nCode,
-            wParam,
-            lParam);
+        // Обязательно передаём событие дальше, чтобы не блокировать систему
+        return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
     }
 
     public void Dispose()
@@ -149,42 +104,19 @@ public sealed class KeyboardHook : IDisposable
         public UIntPtr dwExtraInfo;
     }
 
-    [DllImport(
-        "user32.dll",
-        SetLastError = true,
-        CallingConvention = CallingConvention.Winapi)]
-    private static extern IntPtr SetWindowsHookEx(
-        int idHook,
-        LowLevelKeyboardProc callback,
-        IntPtr hMod,
-        uint dwThreadId);
+    [DllImport("user32.dll", SetLastError = true, CallingConvention = CallingConvention.Winapi)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc callback, IntPtr hMod, uint dwThreadId);
 
-    [DllImport(
-        "user32.dll",
-        SetLastError = true,
-        CallingConvention = CallingConvention.Winapi)]
+    [DllImport("user32.dll", SetLastError = true, CallingConvention = CallingConvention.Winapi)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool UnhookWindowsHookEx(
-        IntPtr hhk);
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
 
-    [DllImport(
-        "user32.dll",
-        CallingConvention = CallingConvention.Winapi)]
-    private static extern IntPtr CallNextHookEx(
-        IntPtr hhk,
-        int nCode,
-        IntPtr wParam,
-        IntPtr lParam);
+    [DllImport("user32.dll", CallingConvention = CallingConvention.Winapi)]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
-    [DllImport(
-        "user32.dll",
-        CallingConvention = CallingConvention.Winapi)]
+    [DllImport("user32.dll", CallingConvention = CallingConvention.Winapi)]
     private static extern IntPtr GetForegroundWindow();
 
-    [DllImport(
-        "user32.dll",
-        CallingConvention = CallingConvention.Winapi)]
-    private static extern uint GetWindowThreadProcessId(
-        IntPtr hWnd,
-        out uint processId);
+    [DllImport("user32.dll", CallingConvention = CallingConvention.Winapi)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
